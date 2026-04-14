@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>People Dream Demo</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        margin: 0;
+        background: #101418;
+        color: #f3f7fb;
+      }
+
+      main {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 24px 16px 48px;
+      }
+
+      h1, h2, h3, p, ul {
+        margin-top: 0;
+      }
+
+      .layout {
+        display: grid;
+        gap: 16px;
+      }
+
+      .panel {
+        border: 1px solid #2d3946;
+        border-radius: 8px;
+        background: #17202a;
+        padding: 16px;
+      }
+
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+        border-radius: 6px;
+        border: 1px solid #3b4958;
+        padding: 10px 12px;
+      }
+
+      button {
+        cursor: pointer;
+        background: #7ce4bc;
+        color: #0d151d;
+        font-weight: 600;
+      }
+
+      button.secondary {
+        background: #24313d;
+        color: #f3f7fb;
+      }
+
+      input,
+      select {
+        background: #0f161d;
+        color: #f3f7fb;
+      }
+
+      .grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      }
+
+      .muted {
+        color: #a8b5c2;
+      }
+
+      .resource {
+        padding: 12px 0;
+        border-top: 1px solid #263340;
+      }
+
+      .resource:first-child,
+      .rule:first-child,
+      .blocked:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      .rule,
+      .blocked {
+        padding: 12px 0;
+        border-top: 1px solid #263340;
+      }
+
+      code {
+        word-break: break-all;
+      }
+
+      .pill {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: #273748;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="layout">
+      <section class="panel">
+        <div class="row" style="justify-content: space-between;">
+          <div>
+            <h1>People Dream Demo</h1>
+            <p class="muted">插件把页面送到 localhost，服务负责黑名单、版本化和梦报。</p>
+          </div>
+          <div class="row">
+            <button id="refreshButton" class="secondary">刷新</button>
+            <button id="pauseButton">切换暂停</button>
+          </div>
+        </div>
+        <div class="row">
+          <span id="pausedState" class="pill">加载中</span>
+          <span id="trackedStats" class="pill">0 条资源</span>
+          <span id="blockedStats" class="pill">0 次拦截</span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>今日梦报</h2>
+          <p id="overview" class="muted"></p>
+          <h3>主题</h3>
+          <ul id="themes"></ul>
+          <h3>明天继续</h3>
+          <ul id="suggestions"></ul>
+        </article>
+
+        <article class="panel">
+          <h2>新增黑名单</h2>
+          <form id="ruleForm" class="layout">
+            <label>
+              <div class="muted">类型</div>
+              <select name="kind">
+                <option value="domain">域名</option>
+                <option value="url">URL</option>
+              </select>
+            </label>
+            <label>
+              <div class="muted">模式</div>
+              <select name="mode">
+                <option value="drop">drop</option>
+                <option value="meta-only">meta-only</option>
+              </select>
+            </label>
+            <label>
+              <div class="muted">匹配规则</div>
+              <input name="pattern" placeholder="例如 *://*/settings* 或 mail.*">
+            </label>
+            <button type="submit">保存规则</button>
+          </form>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>持续关注页面</h2>
+          <div id="resources"></div>
+        </article>
+
+        <article class="panel">
+          <h2>黑名单规则</h2>
+          <div id="rules"></div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <h2>最近拦截</h2>
+        <div id="blockedEvents"></div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+  </html>

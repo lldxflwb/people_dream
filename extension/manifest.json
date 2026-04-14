@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "People Dream Demo",
+  "version": "0.1.0",
+  "description": "Capture browser pages and send them to localhost for dream reporting.",
+  "permissions": ["tabs"],
+  "host_permissions": [
+    "http://127.0.0.1:4017/*",
+    "http://localhost:4017/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "exclude_matches": [
+        "http://127.0.0.1:4017/*",
+        "http://localhost:4017/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

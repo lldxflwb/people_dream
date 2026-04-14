@@ -1,4 +1,17 @@
 (function () {
+  getConfiguredBaseUrl()
+    .then((baseUrl) => {
+      const baseOrigin = new URL(baseUrl).origin;
+      if (location.origin === baseOrigin) {
+        return;
+      }
+      startCapture();
+    })
+    .catch(() => {
+      startCapture();
+    });
+
+  function startCapture() {
   const state = {
     enteredAt: Date.now(),
     maxScrollDepth: 0,
@@ -95,4 +108,5 @@
   });
 
   setTimeout(() => capturePage("timer"), 8000);
+  }
 })();

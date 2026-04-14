@@ -39,6 +39,15 @@
         color: #f2f7fb;
       }
 
+      input {
+        border: 1px solid #314253;
+        border-radius: 6px;
+        padding: 10px 12px;
+        background: #18212a;
+        color: #f2f7fb;
+        font: inherit;
+      }
+
       .muted {
         color: #a6b6c5;
       }
@@ -50,10 +59,16 @@
         <h1>People Dream</h1>
         <p id="status" class="muted">检查 localhost 状态中...</p>
       </div>
+      <div class="layout">
+        <label for="baseUrlInput" class="muted">服务地址</label>
+        <input id="baseUrlInput" placeholder="http://127.0.0.1:9095">
+        <button id="saveAddressButton" class="secondary">保存地址</button>
+      </div>
       <button id="captureButton">立即捕获当前页</button>
       <button id="pauseButton" class="secondary">切换暂停</button>
       <button id="openButton" class="secondary">打开本地面板</button>
     </div>
+    <script src="shared.js"></script>
     <script src="popup.js"></script>
   </body>
   </html>

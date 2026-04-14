@@ -1,19 +1,28 @@
-const API_URL = "http://127.0.0.1:4017/api/capture";
+importScripts("shared.js");
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== "capture-page") {
     return false;
   }
 
-  fetch(API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(message.payload)
-  })
+  getConfiguredBaseUrl()
+    .then((baseUrl) =>
+      fetch(`${baseUrl}/api/capture`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(message.payload)
+      })
+    )
     .then(async (response) => {
-      const data = await response.json();
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = null;
+      }
+
       sendResponse({
         ok: response.ok,
         data,

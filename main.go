@@ -14,7 +14,7 @@ import (
 var embeddedPublic embed.FS
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:4017", "listen address")
+	addr := flag.String("addr", "0.0.0.0:9095", "listen address")
 	dataDir := flag.String("data-dir", "data", "directory for local data")
 	flag.Parse()
 

@@ -78,6 +78,10 @@
         grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       }
 
+      .day-nav {
+        justify-content: space-between;
+      }
+
       .muted {
         color: #a8b5c2;
       }
@@ -128,14 +132,29 @@
         </div>
         <div class="row">
           <span id="pausedState" class="pill">加载中</span>
+          <span id="currentDayState" class="pill">查看日期</span>
           <span id="trackedStats" class="pill">0 条资源</span>
           <span id="blockedStats" class="pill">0 次拦截</span>
         </div>
       </section>
 
+      <section class="panel">
+        <div class="row day-nav">
+          <div>
+            <h2>按天翻页</h2>
+            <p id="daySummary" class="muted">加载中...</p>
+          </div>
+          <div class="row">
+            <button id="prevDayButton" class="secondary">前一天</button>
+            <button id="latestDayButton" class="secondary">回到最新</button>
+            <button id="nextDayButton" class="secondary">后一天</button>
+          </div>
+        </div>
+      </section>
+
       <section class="grid">
         <article class="panel">
-          <h2>今日梦报</h2>
+          <h2 id="reportTitle">当日梦报</h2>
           <p id="overview" class="muted"></p>
           <h3>主题</h3>
           <ul id="themes"></ul>
@@ -171,7 +190,7 @@
 
       <section class="grid">
         <article class="panel">
-          <h2>持续关注页面</h2>
+          <h2 id="resourcesTitle">当日收集页面</h2>
           <div id="resources"></div>
         </article>
 
@@ -182,7 +201,7 @@
       </section>
 
       <section class="panel">
-        <h2>最近拦截</h2>
+        <h2 id="blockedTitle">当日拦截</h2>
         <div id="blockedEvents"></div>
       </section>
     </main>

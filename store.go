@@ -153,6 +153,8 @@ type compactResource struct {
 }
 
 type stateSummary struct {
+	CurrentDay    string            `json:"currentDay"`
+	AvailableDays []string          `json:"availableDays"`
 	Settings      settings          `json:"settings"`
 	BlockedEvents []blockedEvent    `json:"blockedEvents"`
 	Report        dreamReport       `json:"report"`
@@ -265,37 +267,58 @@ func (s *store) initSchema() error {
 	return nil
 }
 
-func (s *store) summarize() (stateSummary, error) {
+func (s *store) summarize(requestedDay string) (stateSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.summarizeLocked(context.Background())
+	return s.summarizeLocked(context.Background(), requestedDay)
 }
 
-func (s *store) summarizeLocked(ctx context.Context) (stateSummary, error) {
-	return s.summarizeFromQuerier(ctx, s.db)
+func (s *store) summarizeLocked(ctx context.Context, requestedDay string) (stateSummary, error) {
+	return s.summarizeFromQuerier(ctx, s.db, requestedDay)
 }
 
-func (s *store) summarizeFromQuerier(ctx context.Context, querier queryer) (stateSummary, error) {
+func (s *store) summarizeFromQuerier(ctx context.Context, querier queryer, requestedDay string) (stateSummary, error) {
 	settingsValue, err := s.loadSettings(ctx, querier)
 	if err != nil {
 		return stateSummary{}, err
 	}
-	blockedAll, err := s.loadBlockedEvents(ctx, querier, 0)
+	availableDays, err := s.loadAvailableDays(ctx, querier)
 	if err != nil {
 		return stateSummary{}, err
 	}
-	resources, err := s.loadCompactResources(ctx, querier)
+	activeDay := resolveActiveDay(requestedDay, availableDays)
+	startAt, endAt, err := dayRangeUTC(activeDay)
+	if err != nil {
+		return stateSummary{}, err
+	}
+
+	blockedAll, err := s.loadBlockedEventsForDay(ctx, querier, startAt, endAt, 0)
+	if err != nil {
+		return stateSummary{}, err
+	}
+	resources, err := s.loadCompactResourcesForDay(ctx, querier, startAt, endAt)
 	if err != nil {
 		return stateSummary{}, err
 	}
 
 	report := buildDreamReport(resources, blockedAll)
 	blockedTop := blockedAll
+	if blockedTop == nil {
+		blockedTop = []blockedEvent{}
+	}
 	if len(blockedTop) > 20 {
 		blockedTop = blockedTop[:20]
 	}
+	if availableDays == nil {
+		availableDays = []string{}
+	}
+	if resources == nil {
+		resources = []compactResource{}
+	}
 
 	return stateSummary{
+		CurrentDay:    activeDay,
+		AvailableDays: availableDays,
 		Settings:      settingsValue,
 		BlockedEvents: blockedTop,
 		Report:        report,
@@ -466,7 +489,7 @@ func (s *store) processCapture(input capturePayload) (captureResponse, error) {
 		}
 	}
 
-	summary, err := s.summarizeFromQuerier(ctx, tx)
+	summary, err := s.summarizeFromQuerier(ctx, tx, localDayKeyFromTimestamp(payload.CapturedAt))
 	if err != nil {
 		return captureResponse{}, err
 	}
@@ -492,7 +515,7 @@ func (s *store) updatePaused(paused bool) (stateSummary, error) {
 	if _, err := s.db.ExecContext(ctx, `UPDATE app_state SET paused = ? WHERE id = 1`, boolToInt(paused)); err != nil {
 		return stateSummary{}, err
 	}
-	return s.summarizeLocked(ctx)
+	return s.summarizeLocked(ctx, "")
 }
 
 func (s *store) addBlacklistRule(rule blacklistRule) (stateSummary, error) {
@@ -524,7 +547,7 @@ func (s *store) addBlacklistRule(rule blacklistRule) (stateSummary, error) {
 	); err != nil {
 		return stateSummary{}, err
 	}
-	return s.summarizeLocked(ctx)
+	return s.summarizeLocked(ctx, "")
 }
 
 func (s *store) deleteBlacklistRule(ruleID string) (stateSummary, error) {
@@ -535,7 +558,7 @@ func (s *store) deleteBlacklistRule(ruleID string) (stateSummary, error) {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM blacklist_rules WHERE id = ?`, ruleID); err != nil {
 		return stateSummary{}, err
 	}
-	return s.summarizeLocked(ctx)
+	return s.summarizeLocked(ctx, "")
 }
 
 func (s *store) loadSettings(ctx context.Context, querier queryer) (settings, error) {
@@ -580,6 +603,146 @@ func (s *store) loadBlacklistRules(ctx context.Context, querier queryer) ([]blac
 		rules = append(rules, rule)
 	}
 	return rules, rows.Err()
+}
+
+func (s *store) loadAvailableDays(ctx context.Context, querier queryer) ([]string, error) {
+	rows, err := querier.QueryContext(
+		ctx,
+		`SELECT captured_at AS event_at FROM visits
+		 UNION ALL
+		 SELECT blocked_at AS event_at FROM blocked_events`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	seen := map[string]struct{}{}
+	days := []string{}
+	for rows.Next() {
+		var eventAt string
+		if err := rows.Scan(&eventAt); err != nil {
+			return nil, err
+		}
+		day := localDayKeyFromTimestamp(eventAt)
+		if day == "" {
+			continue
+		}
+		if _, exists := seen[day]; exists {
+			continue
+		}
+		seen[day] = struct{}{}
+		days = append(days, day)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(days)))
+	return days, nil
+}
+
+func (s *store) loadBlockedEventsForDay(ctx context.Context, querier queryer, startAt, endAt string, limit int) ([]blockedEvent, error) {
+	query := `SELECT id, url, title, blocked_at, mode, rule_id, rule_kind, rule_pattern
+	          FROM blocked_events
+	          WHERE blocked_at >= ? AND blocked_at < ?
+	          ORDER BY blocked_at DESC, rowid DESC`
+	args := []any{startAt, endAt}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := querier.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	events := []blockedEvent{}
+	for rows.Next() {
+		var item blockedEvent
+		if err := rows.Scan(
+			&item.ID,
+			&item.URL,
+			&item.Title,
+			&item.BlockedAt,
+			&item.Mode,
+			&item.Rule.ID,
+			&item.Rule.Kind,
+			&item.Rule.Pattern,
+		); err != nil {
+			return nil, err
+		}
+		item.Rule.Mode = item.Mode
+		events = append(events, item)
+	}
+	return events, rows.Err()
+}
+
+func (s *store) loadCompactResourcesForDay(ctx context.Context, querier queryer, startAt, endAt string) ([]compactResource, error) {
+	rows, err := querier.QueryContext(
+		ctx,
+		`SELECT r.id, r.normalized_url, r.host, MAX(v.captured_at) AS last_seen_at,
+		        r.latest_hash, r.latest_title, r.latest_excerpt
+		 FROM resources r
+		 JOIN visits v ON v.resource_id = r.id
+		 WHERE v.captured_at >= ? AND v.captured_at < ?
+		 GROUP BY r.id, r.normalized_url, r.host, r.latest_hash, r.latest_title, r.latest_excerpt
+		 ORDER BY last_seen_at DESC, r.rowid DESC`,
+		startAt,
+		endAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	baseResources := []compactResource{}
+	for rows.Next() {
+		var item compactResource
+		if err := rows.Scan(
+			&item.ID,
+			&item.NormalizedURL,
+			&item.Host,
+			&item.LastSeenAt,
+			&item.LatestHash,
+			&item.LatestTitle,
+			&item.LatestExcerpt,
+		); err != nil {
+			return nil, err
+		}
+
+		baseResources = append(baseResources, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	resources := make([]compactResource, 0, len(baseResources))
+	for _, item := range baseResources {
+		item.Visits, err = s.loadVisitsForResourceDay(ctx, querier, item.ID, startAt, endAt, 10)
+		if err != nil {
+			return nil, err
+		}
+		item.VisitCount = len(item.Visits)
+
+		item.Versions, err = s.loadVersionsForResourceDay(ctx, querier, item.ID, startAt, endAt, 6)
+		if err != nil {
+			return nil, err
+		}
+		item.VersionCount = len(item.Versions)
+
+		if latestVersion, found, err := s.loadLatestVersionBefore(ctx, querier, item.ID, endAt); err != nil {
+			return nil, err
+		} else if found {
+			item.LatestHash = latestVersion.TextHash
+			item.LatestTitle = latestVersion.Title
+			item.LatestExcerpt = latestVersion.Excerpt
+		}
+
+		resources = append(resources, item)
+	}
+	return resources, nil
 }
 
 func (s *store) loadBlockedEvents(ctx context.Context, querier queryer, limit int) ([]blockedEvent, error) {
@@ -631,7 +794,7 @@ func (s *store) loadCompactResources(ctx context.Context, querier queryer) ([]co
 	}
 	defer rows.Close()
 
-	resources := []compactResource{}
+	baseResources := []compactResource{}
 	for rows.Next() {
 		var item compactResource
 		if err := rows.Scan(
@@ -647,6 +810,14 @@ func (s *store) loadCompactResources(ctx context.Context, querier queryer) ([]co
 		); err != nil {
 			return nil, err
 		}
+		baseResources = append(baseResources, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	resources := make([]compactResource, 0, len(baseResources))
+	for _, item := range baseResources {
 		item.Visits, err = s.loadVisitsForResource(ctx, querier, item.ID, 10)
 		if err != nil {
 			return nil, err
@@ -657,7 +828,7 @@ func (s *store) loadCompactResources(ctx context.Context, querier queryer) ([]co
 		}
 		resources = append(resources, item)
 	}
-	return resources, rows.Err()
+	return resources, nil
 }
 
 func (s *store) loadCompactResourceByID(ctx context.Context, querier queryer, resourceID string) (compactResource, error) {
@@ -726,6 +897,39 @@ func (s *store) loadVisitsForResource(ctx context.Context, querier queryer, reso
 	return visits, nil
 }
 
+func (s *store) loadVisitsForResourceDay(ctx context.Context, querier queryer, resourceID, startAt, endAt string, limit int) ([]visit, error) {
+	rows, err := querier.QueryContext(
+		ctx,
+		`SELECT id, captured_at, dwell_ms, scroll_depth, reason
+		 FROM visits
+		 WHERE resource_id = ? AND captured_at >= ? AND captured_at < ?
+		 ORDER BY captured_at DESC, rowid DESC
+		 LIMIT ?`,
+		resourceID,
+		startAt,
+		endAt,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	visits := []visit{}
+	for rows.Next() {
+		var item visit
+		if err := rows.Scan(&item.ID, &item.CapturedAt, &item.DwellMs, &item.ScrollDepth, &item.Reason); err != nil {
+			return nil, err
+		}
+		visits = append(visits, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	reverseVisits(visits)
+	return visits, nil
+}
+
 func (s *store) loadVersionsForResource(ctx context.Context, querier queryer, resourceID string, limit int) ([]snapshotVersion, error) {
 	rows, err := querier.QueryContext(
 		ctx,
@@ -735,6 +939,39 @@ func (s *store) loadVersionsForResource(ctx context.Context, querier queryer, re
 		 ORDER BY captured_at DESC, rowid DESC
 		 LIMIT ?`,
 		resourceID,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	versions := []snapshotVersion{}
+	for rows.Next() {
+		var item snapshotVersion
+		if err := rows.Scan(&item.ID, &item.CapturedAt, &item.Title, &item.TextHash, &item.Excerpt, &item.WordCount); err != nil {
+			return nil, err
+		}
+		versions = append(versions, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	reverseVersions(versions)
+	return versions, nil
+}
+
+func (s *store) loadVersionsForResourceDay(ctx context.Context, querier queryer, resourceID, startAt, endAt string, limit int) ([]snapshotVersion, error) {
+	rows, err := querier.QueryContext(
+		ctx,
+		`SELECT id, captured_at, title, text_hash, excerpt, word_count
+		 FROM snapshot_versions
+		 WHERE resource_id = ? AND captured_at >= ? AND captured_at < ?
+		 ORDER BY captured_at DESC, rowid DESC
+		 LIMIT ?`,
+		resourceID,
+		startAt,
+		endAt,
 		limit,
 	)
 	if err != nil {
@@ -797,6 +1034,29 @@ func (s *store) loadLatestVersion(ctx context.Context, querier queryer, resource
 		 ORDER BY captured_at DESC, rowid DESC
 		 LIMIT 1`,
 		resourceID,
+	)
+
+	var item snapshotVersion
+	err := row.Scan(&item.ID, &item.CapturedAt, &item.Title, &item.TextHash, &item.Excerpt, &item.WordCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return snapshotVersion{}, false, nil
+	}
+	if err != nil {
+		return snapshotVersion{}, false, err
+	}
+	return item, true, nil
+}
+
+func (s *store) loadLatestVersionBefore(ctx context.Context, querier queryer, resourceID, before string) (snapshotVersion, bool, error) {
+	row := querier.QueryRowContext(
+		ctx,
+		`SELECT id, captured_at, title, text_hash, excerpt, word_count
+		 FROM snapshot_versions
+		 WHERE resource_id = ? AND captured_at < ?
+		 ORDER BY captured_at DESC, rowid DESC
+		 LIMIT 1`,
+		resourceID,
+		before,
 	)
 
 	var item snapshotVersion
@@ -946,6 +1206,36 @@ func newID() string {
 		return hex.EncodeToString(buffer)
 	}
 	return shortHash(time.Now().UTC().Format(time.RFC3339Nano))
+}
+
+func resolveActiveDay(requestedDay string, availableDays []string) string {
+	requestedDay = strings.TrimSpace(requestedDay)
+	if requestedDay != "" {
+		if _, err := time.ParseInLocation("2006-01-02", requestedDay, time.Local); err == nil {
+			return requestedDay
+		}
+	}
+	if len(availableDays) > 0 {
+		return availableDays[0]
+	}
+	return time.Now().In(time.Local).Format("2006-01-02")
+}
+
+func dayRangeUTC(dayKey string) (string, string, error) {
+	localStart, err := time.ParseInLocation("2006-01-02", dayKey, time.Local)
+	if err != nil {
+		return "", "", err
+	}
+	localEnd := localStart.Add(24 * time.Hour)
+	return localStart.UTC().Format(time.RFC3339), localEnd.UTC().Format(time.RFC3339), nil
+}
+
+func localDayKeyFromTimestamp(value string) string {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return ""
+	}
+	return parsed.In(time.Local).Format("2006-01-02")
 }
 
 func normalizeTime(input string) string {

@@ -39,7 +39,7 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method-not-allowed"})
 			return
 		}
-		state, err := appStore.summarize()
+		state, err := appStore.summarize(r.URL.Query().Get("day"))
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server-error", "message": err.Error()})
 			return

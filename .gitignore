@@ -1,6 +1,8 @@
 people-dream
 people-dream-demo
 AGENTS.md
+dist/
+node_modules/
 data/people-dream.db
 data/people-dream.db-shm
 data/people-dream.db-wal

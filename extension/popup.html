@@ -51,6 +51,17 @@
       .muted {
         color: #a6b6c5;
       }
+
+      .panel {
+        border: 1px solid #314253;
+        border-radius: 6px;
+        padding: 12px;
+        background: #18212a;
+      }
+
+      code {
+        word-break: break-all;
+      }
     </style>
   </head>
   <body>
@@ -63,6 +74,14 @@
         <label for="baseUrlInput" class="muted">服务地址</label>
         <input id="baseUrlInput" placeholder="http://127.0.0.1:9095">
         <button id="saveAddressButton" class="secondary">保存地址</button>
+      </div>
+      <div class="panel layout">
+        <div>
+          <strong>当前页面采集情况</strong>
+        </div>
+        <p id="pageStatusSummary" class="muted">读取当前页面状态中...</p>
+        <p id="pageStatusUrl" class="muted"></p>
+        <p id="pageStatusMeta" class="muted"></p>
       </div>
       <button id="captureButton">立即捕获当前页</button>
       <button id="pauseButton" class="secondary">切换暂停</button>

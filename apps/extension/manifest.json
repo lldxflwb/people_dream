@@ -21,7 +21,7 @@
         "http://127.0.0.1:9095/*",
         "http://localhost:9095/*"
       ],
-      "js": ["shared.js", "content.js"],
+      "js": ["content.js"],
       "run_at": "document_idle"
     }
   ]

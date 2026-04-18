@@ -1,0 +1,20 @@
+{
+  "name": "extension",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check": "pnpm run typecheck && pnpm run build && node ./scripts/check.mjs",
+    "pack": "pnpm run build"
+  },
+  "dependencies": {
+    "webextension-polyfill": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/firefox-webext-browser": "^120.0.4",
+    "@types/node": "^24.7.2",
+    "esbuild": "^0.25.11",
+    "typescript": "^5.9.3"
+  }
+}

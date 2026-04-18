@@ -3,7 +3,7 @@ people-dream-demo
 AGENTS.md
 dist/
 node_modules/
-data/people-dream.db
-data/people-dream.db-shm
-data/people-dream.db-wal
+apps/backend/data/people-dream.db
+apps/backend/data/people-dream.db-shm
+apps/backend/data/people-dream.db-wal
 tmpdata/

@@ -154,10 +154,23 @@
 
       <section class="grid">
         <article class="panel">
-          <h2 id="reportTitle">当日梦报</h2>
+          <div class="row" style="justify-content: space-between;">
+            <h2 id="reportTitle">当日梦报</h2>
+            <div class="row">
+              <span id="dreamReportMeta" class="pill">规则版</span>
+              <button id="generateDreamButton" class="secondary">生成 AI 梦报</button>
+            </div>
+          </div>
+          <p id="dreamReportStatus" class="muted"></p>
           <p id="overview" class="muted"></p>
           <h3>主题</h3>
           <ul id="themes"></ul>
+          <h3>持续关注</h3>
+          <ul id="ongoingResources"></ul>
+          <h3>未完成问题</h3>
+          <ul id="unfinishedQuestions"></ul>
+          <h3>连接</h3>
+          <ul id="connections"></ul>
           <h3>明天继续</h3>
           <ul id="suggestions"></ul>
         </article>

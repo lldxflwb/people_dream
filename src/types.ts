@@ -71,13 +71,36 @@ export interface OngoingResource {
   lastSeenAt: string;
 }
 
+export interface DreamReportMeta {
+  source: "rule" | "codex";
+  model: string;
+  authReady: boolean;
+  stale: boolean;
+}
+
+export type DreamTaskStatus = "pending" | "running" | "completed" | "failed";
+
+export interface DreamTask {
+  id: string;
+  day: string;
+  status: DreamTaskStatus;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  inputHash: string;
+  errorMessage?: string;
+}
+
 export interface DreamReport {
   generatedAt: string;
   overview: string;
   themes: ThemeScore[];
   ongoingResources: OngoingResource[];
+  unfinishedQuestions: string[];
+  connections: string[];
   suggestions: string[];
   stats: ReportStats;
+  meta: DreamReportMeta;
 }
 
 export interface StateSummary {
@@ -85,6 +108,7 @@ export interface StateSummary {
   availableDays: string[];
   settings: Settings;
   blockedEvents: BlockedEvent[];
+  dreamTask?: DreamTask;
   report: DreamReport;
   resources: CompactResource[];
 }
@@ -117,4 +141,10 @@ export interface PageStatusResponse {
   reason?: string;
   rule?: BlacklistRule;
   resource?: CompactResource;
+}
+
+export interface DreamTaskCreateResponse {
+  created: boolean;
+  task: DreamTask;
+  message?: string;
 }

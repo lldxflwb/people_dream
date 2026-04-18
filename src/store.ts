@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import Database from "better-sqlite3";
 
+import { generateDreamReportWithCodex, hasLocalCodexAuth } from "./codex.js";
 import { buildDreamReport } from "./report.js";
 import type {
   BlacklistRule,
@@ -11,6 +12,9 @@ import type {
   CapturePayload,
   CaptureResponse,
   CompactResource,
+  DreamReport,
+  DreamTask,
+  DreamTaskCreateResponse,
   PageStatusResponse,
   Settings,
   SnapshotVersion,
@@ -98,6 +102,25 @@ interface VersionRow {
   word_count: number;
 }
 
+interface DreamReportCacheRow {
+  day_key: string;
+  input_hash: string;
+  generated_at: string;
+  model: string;
+  payload_json: string;
+}
+
+interface DreamTaskRow {
+  id: string;
+  day_key: string;
+  status: string;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  input_hash: string;
+  error_message: string | null;
+}
+
 interface SanitizedCapturePayload {
   url: string;
   title: string;
@@ -178,11 +201,31 @@ const SCHEMA_STATEMENTS = [
     word_count INTEGER NOT NULL,
     FOREIGN KEY(resource_id) REFERENCES resources(id) ON DELETE CASCADE
   );`,
+  `CREATE TABLE IF NOT EXISTS dream_reports (
+    day_key TEXT PRIMARY KEY,
+    input_hash TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    model TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+  );`,
+  `CREATE TABLE IF NOT EXISTS dream_report_tasks (
+    id TEXT PRIMARY KEY,
+    day_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    input_hash TEXT NOT NULL,
+    error_message TEXT
+  );`,
   `CREATE INDEX IF NOT EXISTS idx_blacklist_rules_created_at ON blacklist_rules(created_at DESC);`,
   `CREATE INDEX IF NOT EXISTS idx_blocked_events_blocked_at ON blocked_events(blocked_at DESC);`,
   `CREATE INDEX IF NOT EXISTS idx_resources_last_seen_at ON resources(last_seen_at DESC);`,
   `CREATE INDEX IF NOT EXISTS idx_visits_resource_captured_at ON visits(resource_id, captured_at DESC);`,
-  `CREATE INDEX IF NOT EXISTS idx_versions_resource_captured_at ON snapshot_versions(resource_id, captured_at DESC);`
+  `CREATE INDEX IF NOT EXISTS idx_versions_resource_captured_at ON snapshot_versions(resource_id, captured_at DESC);`,
+  `CREATE INDEX IF NOT EXISTS idx_dream_reports_generated_at ON dream_reports(generated_at DESC);`,
+  `CREATE INDEX IF NOT EXISTS idx_dream_report_tasks_day_created_at
+    ON dream_report_tasks(day_key, created_at DESC);`
 ] as const;
 
 function nowIso(): string {
@@ -256,6 +299,75 @@ function dayRangeUtc(dayKey: string): { startAt: string; endAt: string } {
 function reverseInPlace<T>(values: T[]): T[] {
   values.reverse();
   return values;
+}
+
+function buildDayInputHash(resources: CompactResource[], blockedEvents: BlockedEvent[]): string {
+  const payload = JSON.stringify({
+    resources: resources.map((resource) => ({
+      id: resource.id,
+      latestHash: resource.latestHash,
+      latestTitle: resource.latestTitle,
+      latestExcerpt: resource.latestExcerpt,
+      visitCount: resource.visitCount,
+      versionCount: resource.versionCount,
+      lastSeenAt: resource.lastSeenAt,
+      visits: resource.visits.map((visit) => ({
+        id: visit.id,
+        capturedAt: visit.capturedAt,
+        dwellMs: visit.dwellMs,
+        scrollDepth: visit.scrollDepth,
+        reason: visit.reason
+      })),
+      versions: resource.versions.map((version) => ({
+        id: version.id,
+        capturedAt: version.capturedAt,
+        title: version.title,
+        textHash: version.textHash,
+        excerpt: version.excerpt,
+        wordCount: version.wordCount
+      }))
+    })),
+    blockedEvents: blockedEvents.map((event) => ({
+      id: event.id,
+      blockedAt: event.blockedAt,
+      mode: event.mode,
+      ruleId: event.rule.id,
+      ruleKind: event.rule.kind,
+      rulePattern: event.rule.pattern
+    }))
+  });
+
+  return createHash("sha1").update(payload).digest("hex");
+}
+
+function parseStoredDreamReport(payload: string): DreamReport | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload) as unknown;
+  } catch {
+    return undefined;
+  }
+
+  if (typeof parsed !== "object" || parsed === null) {
+    return undefined;
+  }
+
+  const report = parsed as Partial<DreamReport>;
+  if (
+    typeof report.generatedAt !== "string" ||
+    typeof report.overview !== "string" ||
+    !Array.isArray(report.themes) ||
+    !Array.isArray(report.ongoingResources) ||
+    !Array.isArray(report.unfinishedQuestions) ||
+    !Array.isArray(report.connections) ||
+    !Array.isArray(report.suggestions) ||
+    typeof report.stats !== "object" ||
+    report.stats === null
+  ) {
+    return undefined;
+  }
+
+  return report as DreamReport;
 }
 
 function firstNonEmpty(...values: string[]): string {
@@ -385,8 +497,29 @@ function mapVersionRow(row: VersionRow): SnapshotVersion {
   };
 }
 
+function mapDreamTaskRow(row: DreamTaskRow): DreamTask {
+  return {
+    id: row.id,
+    day: row.day_key,
+    status:
+      row.status === "running"
+        ? "running"
+        : row.status === "completed"
+          ? "completed"
+          : row.status === "failed"
+            ? "failed"
+            : "pending",
+    createdAt: row.created_at,
+    inputHash: row.input_hash,
+    ...(row.started_at ? { startedAt: row.started_at } : {}),
+    ...(row.completed_at ? { completedAt: row.completed_at } : {}),
+    ...(row.error_message ? { errorMessage: row.error_message } : {})
+  };
+}
+
 export class Store {
   private readonly db: Database.Database;
+  private readonly activeDreamTasks = new Set<string>();
 
   constructor(dataDir: string) {
     mkdirSync(dataDir, { recursive: true });
@@ -395,6 +528,7 @@ export class Store {
     this.db.pragma("foreign_keys = ON");
     this.db.pragma("busy_timeout = 5000");
     this.initSchema();
+    this.recoverInterruptedDreamTasks();
   }
 
   close(): void {
@@ -408,15 +542,90 @@ export class Store {
     const { startAt, endAt } = dayRangeUtc(activeDay);
     const blockedEvents = this.loadBlockedEventsForDay(startAt, endAt);
     const resources = this.loadCompactResourcesForDay(startAt, endAt);
+    const authReady = hasLocalCodexAuth();
+    const inputHash = buildDayInputHash(resources, blockedEvents);
+    const cachedDreamReport = this.loadDreamReport(activeDay);
+    const stale = cachedDreamReport !== undefined && cachedDreamReport.input_hash !== inputHash;
+
+    let report = buildDreamReport(resources, blockedEvents, { authReady, stale });
+    if (cachedDreamReport && cachedDreamReport.input_hash === inputHash) {
+      const storedReport = parseStoredDreamReport(cachedDreamReport.payload_json);
+      if (storedReport) {
+        report = {
+          ...storedReport,
+          meta: {
+            source: "codex",
+            model: cachedDreamReport.model,
+            authReady,
+            stale: false
+          }
+        };
+      }
+    }
+
+    const dreamTask = this.loadLatestDreamTaskForDay(activeDay);
 
     return {
       currentDay: activeDay,
       availableDays,
       settings,
       blockedEvents: blockedEvents.slice(0, 20),
-      report: buildDreamReport(resources, blockedEvents),
-      resources
+      report,
+      resources,
+      ...(dreamTask ? { dreamTask } : {})
     };
+  }
+
+  createDreamReportTask(requestedDay: string): DreamTaskCreateResponse {
+    const availableDays = this.loadAvailableDays();
+    const activeDay = resolveActiveDay(requestedDay, availableDays);
+    const { startAt, endAt } = dayRangeUtc(activeDay);
+    const blockedEvents = this.loadBlockedEventsForDay(startAt, endAt);
+    const resources = this.loadCompactResourcesForDay(startAt, endAt);
+    const inputHash = buildDayInputHash(resources, blockedEvents);
+    const cachedDreamReport = this.loadDreamReport(activeDay);
+
+    if (!hasLocalCodexAuth()) {
+      throw new Error("未检测到 Codex 本地登录态，请先在终端运行 codex 完成登录。");
+    }
+    if (resources.length === 0 && blockedEvents.length === 0) {
+      throw new Error("当天还没有可用于梦境推理的浏览数据。");
+    }
+
+    const latestTask = this.loadLatestDreamTaskForDay(activeDay);
+    if (latestTask && (latestTask.status === "pending" || latestTask.status === "running")) {
+      return {
+        created: false,
+        task: latestTask,
+        message: "该日期已有进行中的梦境推理任务。"
+      };
+    }
+
+    if (latestTask && latestTask.status === "completed" && latestTask.inputHash === inputHash) {
+      throw new Error("该日期的梦境推理已经生成过了。");
+    }
+    if (cachedDreamReport && cachedDreamReport.input_hash === inputHash) {
+      throw new Error("该日期的梦境推理已经生成过了。");
+    }
+
+    const task = this.insertDreamTask(activeDay, inputHash);
+    queueMicrotask(() => {
+      void this.runDreamReportTask(task.id);
+    });
+
+    return {
+      created: true,
+      task,
+      message: "梦境推理任务已创建。"
+    };
+  }
+
+  getDreamReportTask(taskId: string): DreamTask {
+    const task = this.loadDreamTaskById(taskId);
+    if (!task) {
+      throw new Error("dream task not found");
+    }
+    return task;
   }
 
   processCapture(input: CapturePayload): CaptureResponse {
@@ -634,6 +843,11 @@ export class Store {
     return this.summarize("");
   }
 
+  deleteResource(resourceId: string, requestedDay: string): StateSummary {
+    this.run(`DELETE FROM resources WHERE id = ?`, [resourceId]);
+    return this.summarize(requestedDay);
+  }
+
   private initSchema(): void {
     for (const statement of SCHEMA_STATEMENTS) {
       this.db.exec(statement);
@@ -652,6 +866,91 @@ export class Store {
         `INSERT INTO blacklist_rules(id, kind, pattern, mode, created_at) VALUES (?, ?, ?, ?, ?)`,
         [rule.id, rule.kind, rule.pattern, rule.mode, createdAt]
       );
+    }
+  }
+
+  private recoverInterruptedDreamTasks(): void {
+    this.run(
+      `UPDATE dream_report_tasks
+          SET status = 'failed',
+              completed_at = ?,
+              error_message = COALESCE(error_message, '任务在服务重启前中断，请重新生成。')
+        WHERE status IN ('pending', 'running')`,
+      [nowIso()]
+    );
+  }
+
+  private insertDreamTask(dayKey: string, inputHash: string): DreamTask {
+    const taskId = randomUUID().replace(/-/g, "");
+    const createdAt = nowIso();
+    this.run(
+      `INSERT INTO dream_report_tasks(id, day_key, status, created_at, input_hash)
+       VALUES (?, ?, 'pending', ?, ?)`,
+      [taskId, dayKey, createdAt, inputHash]
+    );
+    const task = this.loadDreamTaskById(taskId);
+    if (!task) {
+      throw new Error("dream task not found after insert");
+    }
+    return task;
+  }
+
+  private async runDreamReportTask(taskId: string): Promise<void> {
+    if (this.activeDreamTasks.has(taskId)) {
+      return;
+    }
+
+    this.activeDreamTasks.add(taskId);
+    try {
+      const task = this.loadDreamTaskById(taskId);
+      if (!task) {
+        throw new Error("dream task not found");
+      }
+      if (task.status !== "pending" && task.status !== "running") {
+        return;
+      }
+
+      const startedAt = nowIso();
+      this.run(
+        `UPDATE dream_report_tasks
+            SET status = 'running',
+                started_at = ?,
+                error_message = NULL
+          WHERE id = ?`,
+        [startedAt, taskId]
+      );
+
+      const { startAt, endAt } = dayRangeUtc(task.day);
+      const blockedEvents = this.loadBlockedEventsForDay(startAt, endAt);
+      const resources = this.loadCompactResourcesForDay(startAt, endAt);
+      const currentInputHash = buildDayInputHash(resources, blockedEvents);
+      const fallbackReport = buildDreamReport(resources, blockedEvents, {
+        authReady: true,
+        stale: false
+      });
+      const report = await generateDreamReportWithCodex(task.day, resources, blockedEvents, fallbackReport);
+      this.saveDreamReport(task.day, currentInputHash, report);
+      this.run(
+        `UPDATE dream_report_tasks
+            SET status = 'completed',
+                completed_at = ?,
+                input_hash = ?,
+                error_message = NULL
+          WHERE id = ?`,
+        [nowIso(), currentInputHash, taskId]
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "dream task failed";
+      this.run(
+        `UPDATE dream_report_tasks
+            SET status = 'failed',
+                completed_at = ?,
+                error_message = ?
+          WHERE id = ?`,
+        [nowIso(), message, taskId]
+      );
+    } finally {
+      this.activeDreamTasks.delete(taskId);
     }
   }
 
@@ -871,6 +1170,50 @@ export class Store {
       [resourceId, before]
     );
     return row ? mapVersionRow(row) : undefined;
+  }
+
+  private loadDreamReport(dayKey: string): DreamReportCacheRow | undefined {
+    return this.get<DreamReportCacheRow>(
+      `SELECT day_key, input_hash, generated_at, model, payload_json
+         FROM dream_reports
+        WHERE day_key = ?`,
+      [dayKey]
+    );
+  }
+
+  private loadLatestDreamTaskForDay(dayKey: string): DreamTask | undefined {
+    const row = this.get<DreamTaskRow>(
+      `SELECT id, day_key, status, created_at, started_at, completed_at, input_hash, error_message
+         FROM dream_report_tasks
+        WHERE day_key = ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1`,
+      [dayKey]
+    );
+    return row ? mapDreamTaskRow(row) : undefined;
+  }
+
+  private loadDreamTaskById(taskId: string): DreamTask | undefined {
+    const row = this.get<DreamTaskRow>(
+      `SELECT id, day_key, status, created_at, started_at, completed_at, input_hash, error_message
+         FROM dream_report_tasks
+        WHERE id = ?`,
+      [taskId]
+    );
+    return row ? mapDreamTaskRow(row) : undefined;
+  }
+
+  private saveDreamReport(dayKey: string, inputHash: string, report: DreamReport): void {
+    this.run(
+      `INSERT INTO dream_reports(day_key, input_hash, generated_at, model, payload_json)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(day_key) DO UPDATE SET
+         input_hash = excluded.input_hash,
+         generated_at = excluded.generated_at,
+         model = excluded.model,
+         payload_json = excluded.payload_json`,
+      [dayKey, inputHash, report.generatedAt, report.meta.model, JSON.stringify(report)]
+    );
   }
 
   private get<Row>(sql: string, params: SqlValue[] = []): Row | undefined {

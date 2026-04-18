@@ -28,6 +28,10 @@ interface BlacklistRequest {
   mode: string;
 }
 
+interface DreamRequest {
+  day: string;
+}
+
 function parseListenAddress(addr: string): { host: string; port: number } {
   const trimmed = addr.trim();
   const index = trimmed.lastIndexOf(":");
@@ -121,6 +125,15 @@ function parseBlacklistRequest(input: unknown): BlacklistRequest {
   };
 }
 
+function parseDreamRequest(input: unknown): DreamRequest {
+  if (!isObject(input)) {
+    return { day: "" };
+  }
+  return {
+    day: asString(input.day)
+  };
+}
+
 async function serveStatic(response: ServerResponse, requestPath: string): Promise<void> {
   const normalizedPath = requestPath === "/" ? "/index.html" : requestPath;
   const safePath = normalize(normalizedPath).replace(/^(\.\.(\/|\\|$))+/, "");
@@ -187,16 +200,41 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && requestUrl.pathname === "/api/dream-report-tasks") {
+      const payload = parseDreamRequest(await readRequestBody(request));
+      sendJson(response, 202, store.createDreamReportTask(payload.day));
+      return;
+    }
+
+    if (request.method === "GET" && requestUrl.pathname.startsWith("/api/dream-report-tasks/")) {
+      const taskId = decodeURIComponent(requestUrl.pathname.slice("/api/dream-report-tasks/".length));
+      sendJson(response, 200, store.getDreamReportTask(taskId));
+      return;
+    }
+
     if (request.method === "DELETE" && requestUrl.pathname.startsWith("/api/blacklist/")) {
       const ruleId = decodeURIComponent(requestUrl.pathname.slice("/api/blacklist/".length));
       sendJson(response, 200, store.deleteBlacklistRule(ruleId));
       return;
     }
 
+    if (request.method === "DELETE" && requestUrl.pathname.startsWith("/api/resources/")) {
+      const resourceId = decodeURIComponent(requestUrl.pathname.slice("/api/resources/".length));
+      const requestedDay = asString(requestUrl.searchParams.get("day"));
+      sendJson(response, 200, store.deleteResource(resourceId, requestedDay));
+      return;
+    }
+
     await serveStatic(response, requestUrl.pathname);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "unknown error";
-    sendJson(response, 500, {
+    const statusCode =
+      message.includes("已经生成过")
+        ? 409
+        : message.includes("not found")
+          ? 404
+          : 500;
+    sendJson(response, statusCode, {
       error: "server-error",
       message
     });
